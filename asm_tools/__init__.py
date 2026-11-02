@@ -1,6 +1,6 @@
 """RISC201 assembler / disassembler toolchain."""
-from .isa import *                                   # noqa: F401,F403
-from .assembler import (Assembler, AssemblyFailed, AssemblyResult,   # noqa: F401
+from .isa import *                                   
+from .assembler import (Assembler, AssemblyFailed, AssemblyResult,   
                         assemble_file, assemble_source)
-from .disassembler import (decode, disassemble_word, disassemble_words,  # noqa: F401
+from .disassembler import (decode, disassemble_word, disassemble_words,  
                            load_words)

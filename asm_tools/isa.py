@@ -1,17 +1,17 @@
 """
-isa.py - RISC201 (SimpleRISC Extended) ISA definition.
+isa.py - My RISC201 (SimpleRISC Extended) ISA definition.
 
-Single source of truth shared by the assembler and the disassembler.
-Your simulator / control-unit teammates can import this file too, so that
-everyone agrees on opcodes and bit positions.
+This is the single source of truth shared by both the assembler and the disassembler.
+The rest of my team working on the simulator or control-unit can just import this file 
+so we don't have conflicting opcodes or bit positions.
 
-Instruction word = 33 bits (bit 32 = MSB), stored as 9 hex digits.
+Instruction word = 32 bits (bit 31 = MSB), stored as 8 hex digits.
 
-  Register : opcode[32:28] I[27]=0 F[26] rd[25:22] rs1[21:18] rs2[17:14] 0[13:0]
-  Imm  F=0 : opcode        I=1     F=0   rd        rs1        mod[17:16] imm16[15:0]
-  Imm  F=1 : opcode        I=1     F=1   rd        rs1        imm18[17:0]  (top 18 bits of binary32)
-  Branch   : opcode[32:28] offset[27:0]  (signed, in WORDS; target = PC + offset*4)
-  No-operand (nop/ret/halt/rte): opcode, every other bit 0
+  Register : opcode[31:27] I[26]=0 F[25] rd[24:21] rs1[20:17] rs2[16:13] 0[12:0]
+  Imm  F=0 : opcode        I=1     F=0   rd        rs1        mod[16:15] imm15[14:0]
+  Imm  F=1 : opcode        I=1     F=1   rd        rs1        imm17[16:0]  (top 17 bits of binary32)
+  Branch   : opcode[31:27] offset[26:0]  (signed, in WORDS; target = PC + offset*4)
+  No-operand (nop/ret/halt/rte): opcode, every other bit is just 0
 """
 from __future__ import annotations
 
@@ -21,21 +21,21 @@ from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
 
 # --------------------------------------------------------------------------
-# Basic constants
+# Basic constants: The core architectural parameters
 # --------------------------------------------------------------------------
-WORD_BITS = 33
+WORD_BITS = 32
 WORD_MASK = (1 << WORD_BITS) - 1
-HEX_DIGITS = 9
-INSTR_BYTES = 4            # PC advances by 4 per instruction (ISA doc)
+HEX_DIGITS = 8
+INSTR_BYTES = 4            # PC advances by 4 per instruction (just like the ISA doc says)
 NUM_REGS = 16
 REG_SP = 14                # r14
 REG_RA = 15                # r15
 
-# Immediate modifier field, bits [17:16]
+# Immediate modifier field, bits [16:15]
 MOD_NONE, MOD_U, MOD_H = 0b00, 0b01, 0b10
 MOD_SUFFIX = {MOD_NONE: "", MOD_U: ".u", MOD_H: ".h"}
 
-# Operand-shape kinds
+# Operand-shape kinds: Keeps parsing organized
 K_ALU3 = "alu3"      # rd, rs1, rs2|imm
 K_CMP = "cmp"        # rs1, rs2|imm
 K_MOV2 = "mov2"      # rd, rs2|imm
@@ -64,7 +64,7 @@ class OpInfo:
     name: str
     opcode: int
     kind: str
-    float_ok: bool = False      # does an F=1 version exist?
+    float_ok: bool = False      # Does an F=1 version exist for this instruction?
 
 
 _OPS = [
@@ -91,7 +91,7 @@ _OPS = [
     OpInfo("ret", 0b10100, K_NONE),
     OpInfo("push", 0b10101, K_STACK),
     OpInfo("pop", 0b10110, K_STACK),
-    # 10111 and 11000 are free / reserved -> decode as nop
+    # 10111 and 11000 are free / reserved opcodes -> we just decode them as nop
     OpInfo("halt", 0b11001, K_NONE),
     OpInfo("rte", 0b11010, K_NONE),
     OpInfo("min", 0b11011, K_ALU3, True),
@@ -104,23 +104,24 @@ OPS_BY_NAME = {o.name: o for o in _OPS}
 OPS_BY_OPCODE = {o.opcode: o for o in _OPS}
 RESERVED_OPCODES = (0b10111, 0b11000)
 
-# Assembler names for the F=1 forms (same opcode as the integer op)
+# Assembler names for the F=1 float instructions (they share the same opcode as the integer version)
 FLOAT_MNEMONICS = {
     "fadd": "add", "fsub": "sub", "fmul": "mul", "fdiv": "div",
     "fcmp": "cmp", "fmov": "mov", "fmin": "min", "fmax": "max",
     "fabs": "abs", "fneg": "neg",
 }
 FLOAT_NAME_OF = {v: k for k, v in FLOAT_MNEMONICS.items()}
-# fcvt: F bit = "source is float".  fcvt = int->float (F=0), fcvti = float->int (F=1)
+# For fcvt, the F bit means "source is float". So fcvt is int->float (F=0), and fcvti is float->int (F=1)
 FCVT_MNEMONICS = {"fcvt": 0, "i2f": 0, "fcvti": 1, "f2i": 1}
 
 ALL_MNEMONICS = sorted(set(OPS_BY_NAME) | set(FLOAT_MNEMONICS) | set(FCVT_MNEMONICS))
 
 
 def resolve_mnemonic(text: str):
-    """Return (OpInfo, F, modifier) for an assembly mnemonic, or None.
+    """Returns a tuple of (OpInfo, F_bit, modifier) for a given assembly mnemonic. Or None if it's junk.
 
-    Accepts: add, fadd, fcvt/fcvti, and modifier forms add.u / addu / mov.h / movh.
+    Handles standard ops (add), float ops (fadd), conversions (fcvt/fcvti), 
+    and immediate modifiers (add.u / addu / mov.h / movh).
     """
     m = text.lower()
     if m in FCVT_MNEMONICS:
@@ -143,14 +144,14 @@ def resolve_mnemonic(text: str):
 
 
 # --------------------------------------------------------------------------
-# Registers
+# Registers: Parsing and formatting logic
 # --------------------------------------------------------------------------
 _REG_RE = re.compile(r"^(?:r(\d+)|(sp)|(ra))$", re.I)
 
 
 def parse_register(tok: str) -> Optional[int]:
-    """Return register number, None if `tok` is not register-shaped.
-    Raises ValueError for things like r16."""
+    """Returns the integer register number. If it doesn't look like a register, returns None.
+    Throws a ValueError if someone tries to use a non-existent register like r16."""
     m = _REG_RE.match(tok.strip())
     if not m:
         return None
@@ -169,7 +170,7 @@ def reg_name(n: int) -> str:
 
 
 # --------------------------------------------------------------------------
-# Bit helpers
+# Bit helpers: Doing the heavy lifting for instruction packing and unpacking
 # --------------------------------------------------------------------------
 def sext(value: int, bits: int) -> int:
     value &= (1 << bits) - 1
@@ -177,11 +178,11 @@ def sext(value: int, bits: int) -> int:
 
 
 def pack_word(opcode: int, i: int = 0, f: int = 0, rd: int = 0, rs1: int = 0, rest: int = 0) -> int:
-    return ((opcode << 28) | (i << 27) | (f << 26) | (rd << 22) | (rs1 << 18) | (rest & 0x3FFFF))
+    return ((opcode << 27) | (i << 26) | (f << 25) | (rd << 21) | (rs1 << 17) | (rest & 0x1FFFF))
 
 
 def pack_branch(opcode: int, offset: int) -> int:
-    return (opcode << 28) | (offset & 0xFFFFFFF)
+    return (opcode << 27) | (offset & 0x7FFFFFF)
 
 
 class Fields(NamedTuple):
@@ -192,29 +193,29 @@ class Fields(NamedTuple):
     rs1: int
     rs2: int
     mod: int
-    imm16: int
-    imm18: int
-    offset28: int
+    imm15: int
+    imm17: int
+    offset27: int
 
 
 def unpack_word(word: int) -> Fields:
     if not 0 <= word <= WORD_MASK:
         raise ValueError(f"word 0x{word:X} does not fit in {WORD_BITS} bits")
     return Fields(
-        opcode=(word >> 28) & 0x1F, i=(word >> 27) & 1, f=(word >> 26) & 1,
-        rd=(word >> 22) & 0xF, rs1=(word >> 18) & 0xF, rs2=(word >> 14) & 0xF,
-        mod=(word >> 16) & 0x3, imm16=word & 0xFFFF, imm18=word & 0x3FFFF,
-        offset28=word & 0xFFFFFFF,
+        opcode=(word >> 27) & 0x1F, i=(word >> 26) & 1, f=(word >> 25) & 1,
+        rd=(word >> 21) & 0xF, rs1=(word >> 17) & 0xF, rs2=(word >> 13) & 0xF,
+        mod=(word >> 15) & 0x3, imm15=word & 0x7FFF, imm17=word & 0x1FFFF,
+        offset27=word & 0x7FFFFFF,
     )
 
 
 # --------------------------------------------------------------------------
-# IEEE-754 binary32 helpers
+# IEEE-754 binary32 helpers: Managing float immediate conversions
 # --------------------------------------------------------------------------
 def float_to_bits32(x: float) -> int:
     try:
         return struct.unpack("<I", struct.pack("<f", x))[0]
-    except OverflowError:                      # too big for binary32 -> +/-Inf
+    except OverflowError:                      # If it is too big for binary32, just cap it to +/-Inf
         return 0xFF800000 if x < 0 else 0x7F800000
 
 
@@ -223,7 +224,7 @@ def bits32_to_float(bits: int) -> float:
 
 
 # --------------------------------------------------------------------------
-# Program image text formats (hex = 9 digits/line, bin = 33 chars/line)
+# Program image text formats (hex = 8 digits/line, bin = 32 chars/line)
 # --------------------------------------------------------------------------
 def format_hex(word: int) -> str:
     return f"{word:0{HEX_DIGITS}X}"
@@ -237,11 +238,11 @@ _COMMENT_RE = re.compile(r";|//|#")
 
 
 def parse_word_token(tok: str) -> int:
-    """Parse one 33-bit word.
+    """Parses a single 32-bit word token.
 
-    Accepted: 9-digit hex (what the assembler writes), 0xHEX, 0bBIN, or a
-    33-character binary string.  A token of exactly 9 hex digits is always hex
-    (so '0B0448000' is a hex word, not a 0b-prefixed binary number).
+    Handles standard 8-digit hex, 0xHEX, 0bBIN, or full 32-character binary strings.
+    If the token is exactly 8 hex digits it assumes it's hex, so '0B044800' is a hex word, 
+    not a 0b-prefixed binary number.
     """
     t = tok.strip().replace("_", "").lower()
     if not t:
@@ -270,7 +271,7 @@ def parse_word_token(tok: str) -> int:
 
 
 def parse_words(text: str) -> List[int]:
-    """Parse a hex/binary image: one or more words per line, ; // # comments allowed."""
+    """Parses an entire hex/binary image block. Allows one or more words per line, and ignores comments."""
     words: List[int] = []
     for n, line in enumerate(text.splitlines(), 1):
         line = _COMMENT_RE.split(line, 1)[0].strip()

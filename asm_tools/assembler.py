@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-assembler.py - RISC201 two-pass assembler (33-bit instructions).
+assembler.py - My two-pass assembler for the RISC201 COA project (32-bit instructions).
 
-Pass 1: read every line, collect labels / .equ constants, assign addresses.
-Pass 2: encode every instruction, resolving labels (PC-relative for branches).
+Pass 1: Read every line, collect all the labels and .equ constants, and figure out the memory addresses.
+Pass 2: Actually encode every instruction into 32-bit words and resolve those branch labels (PC-relative).
 
-Library use (e.g. from the simulator):
+Library use (for when my team hooks this up to the CPU simulator):
     from assembler import assemble_source
-    result = assemble_source(text)          # raises AssemblyFailed on errors
-    result.words                            # list[int], one 33-bit word per instruction
+    result = assemble_source(text)          # Throws AssemblyFailed if the code is garbage
+    result.words                            # list[int], one 32-bit word per instruction
 
-Command line:
-    python assembler.py prog.asm                 # -> prog.hex  (9 hex digits / line)
-    python assembler.py prog.asm -f bin          # -> prog.bin  (33 binary digits / line)
-    python assembler.py prog.asm -l prog.lst -s  # listing file + symbol table on screen
+Command line stuff:
+    python assembler.py prog.asm                 # -> prog.hex  (8 hex digits / line)
+    python assembler.py prog.asm -f bin          # -> prog.bin  (32 binary digits / line)
+    python assembler.py prog.asm -l prog.lst -s  # Spits out the listing file + symbol table
 """
 from __future__ import annotations
 
@@ -27,16 +27,16 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     from . import isa
-except ImportError:                      # run as a plain script
+except ImportError:                      # Fallback just in case I run this directly as a plain script
     import isa
 
 # ==========================================================================
-# Diagnostics
+# Diagnostics: Basically how I track errors so I don't lose my mind debugging.
 # ==========================================================================
 
 
 class AsmError(Exception):
-    """One error on one source line (internal)."""
+    """Just an internal exception for a single error on a source line."""
 
 
 @dataclass
@@ -68,7 +68,8 @@ class AssemblyFailed(Exception):
 
 
 # ==========================================================================
-# Constant-expression evaluator  (numbers, symbols, + - * / << >> & | ^ ~ ( ))
+# Constant-expression evaluator. Handles numbers, symbols, and basic math (+ - * / << >> & | ^ ~ ()).
+# Needed this to evaluate the weird .equ directives.
 # ==========================================================================
 
 
@@ -179,7 +180,7 @@ def eval_expr(expr: str, symbols: Dict[str, int]) -> int:
 
 
 # ==========================================================================
-# Source-line structures
+# Source-line structures: Dataclasses to keep my parsed data organized.
 # ==========================================================================
 
 _IDENT_RE = re.compile(r"^[A-Za-z_.][A-Za-z0-9_.$]*$")
@@ -194,7 +195,7 @@ _MEM_RE = re.compile(r"^(?P<off>.*?)\[\s*(?P<reg>[^\]]+?)\s*\]$")
 class Symbol:
     name: str
     value: int
-    kind: str          # "label" | "equ"
+    kind: str          # Either a "label" or an "equ" constant
     line: int
 
 
@@ -203,7 +204,7 @@ class SrcLine:
     lineno: int
     raw: str
     addr: int
-    kind: str                       # "instr" | "word"
+    kind: str                       # Can be an actual "instr" or just a raw "word"
     mnemonic: str = ""
     resolved: Optional[tuple] = None
     operands: List[str] = field(default_factory=list)
@@ -250,7 +251,7 @@ def strip_comment(line: str) -> str:
 
 
 def split_operands(args: str) -> List[str]:
-    """Split on commas that are not inside [] or ()."""
+    """Splits the operands by commas, but ignores commas hiding inside brackets so memory offsets don't break."""
     args = args.strip()
     if not args:
         return []
@@ -272,14 +273,14 @@ def split_operands(args: str) -> List[str]:
 
 
 # ==========================================================================
-# The assembler
+# The main Assembler class. Where the magic happens.
 # ==========================================================================
 
 
 class Assembler:
     def __init__(self, base: int = 0, strict: bool = False):
         self.base = base
-        self.strict = strict            # warnings become errors
+        self.strict = strict            # If strict is on, warnings become fatal errors. Helpful for the final eval.
 
     # ---------------------------------------------------------------- driver
     def assemble(self, source: str, filename: str = "<input>") -> AssemblyResult:
@@ -310,11 +311,12 @@ class Assembler:
 
     # ---------------------------------------------------------------- PASS 1
     def _pass1(self):
+        # Pass 1: Just sweeping through to collect labels, .equ constants, and figure out memory addresses.
         addr = self.base
         for lineno, raw in enumerate(self.src_lines, 1):
             try:
                 rest = strip_comment(raw)
-                while True:                                  # leading labels
+                while True:                                  # Grab any leading labels first
                     m = _LABEL_RE.match(rest)
                     if not m:
                         break
@@ -365,7 +367,7 @@ class Assembler:
         if name == ".word":
             exprs = split_operands(args)
             if not exprs:
-                raise AsmError("usage: .word value[, value...]  (raw 33-bit instruction words)")
+                raise AsmError("usage: .word value[, value...]  (raw 32-bit instruction words)")
             for e in exprs:
                 self.lines.append(SrcLine(lineno, raw, addr, "word", ".word", None, [e]))
                 addr += isa.INSTR_BYTES
@@ -376,6 +378,7 @@ class Assembler:
 
     # ---------------------------------------------------------------- PASS 2
     def _pass2(self) -> Tuple[List[ListingItem], List[int]]:
+        # Pass 2: Actually packing the 32-bit words now that we know where all the labels are.
         items, words = [], []
         for ln in self.lines:
             try:
@@ -408,9 +411,9 @@ class Assembler:
         return r
 
     def _float_imm(self, tok: str, lineno: int) -> int:
-        """Return imm18 = top 18 bits of the binary32 value."""
+        """Returns imm17, which is just the top 17 bits of the binary32 float value."""
         t = tok.strip()
-        if _HEX_RE.match(t):                         # raw binary32 bit pattern
+        if _HEX_RE.match(t):                         # Reading the raw binary32 bit pattern
             bits = int(t.replace("_", ""), 16)
             if bits >> 32:
                 raise AsmError(f"float bit pattern {t} does not fit in 32 bits")
@@ -420,33 +423,38 @@ class Assembler:
             else:
                 value = float(self._eval(t))
             bits = isa.float_to_bits32(value)
-        if bits & 0x3FFF:
-            kept = isa.bits32_to_float(bits & ~0x3FFF)
-            self._warn(lineno, f"float immediate '{t}' needs more than 18 bits; truncated to {kept:.9g} "
+        
+        # We only have 17 bits for the float immediate, so we have to warn if we truncate precision.
+        if bits & 0x7FFF:
+            kept = isa.bits32_to_float(bits & ~0x7FFF)
+            self._warn(lineno, f"float immediate '{t}' needs more than 17 bits; truncated to {kept:.9g} "
                                f"(build full-precision constants with ld)")
-        return bits >> 14
+        return bits >> 15
 
     def _op2(self, tok: str, F: int, mod: int, mnemonic: str, lineno: int) -> Tuple[int, int]:
-        """Parse a rs2|imm operand -> (I bit, 18-bit 'rest' field)."""
+        """Parses the second operand. Figures out if it is a register or immediate and sets the I bit."""
         reg = isa.parse_register(tok) if self._looks_like_reg(tok) else None
         if reg is not None:
             if mod:
                 raise AsmError(f"modifier '{isa.MOD_SUFFIX[mod]}' only applies to an immediate operand")
-            return 0, reg << 14
+            return 0, reg << 13
         if F:
             return 1, self._float_imm(tok, lineno)
         val = self._eval(tok)
+        
+        # Checking bounds based on whether it is raw, zero-extended (.u), or upper-half (.h)
         if mod == isa.MOD_NONE:
-            lo, hi = -32768, 32767
+            lo, hi = -16384, 16383
         else:
-            lo, hi = 0, 65535
+            lo, hi = 0, 32767
+            
         if not lo <= val <= hi:
             hint = ""
-            if mod == isa.MOD_NONE and 32768 <= val <= 65535:
+            if mod == isa.MOD_NONE and 16384 <= val <= 32767:
                 hint = " - use the .u (zero-extend) or .h (upper half) form, e.g. " \
                        f"'{mnemonic}.u'"
             raise AsmError(f"immediate {val} out of range [{lo}, {hi}]{hint}")
-        return 1, (mod << 16) | (val & 0xFFFF)
+        return 1, (mod << 15) | (val & 0x7FFF)
 
     @staticmethod
     def _looks_like_reg(tok: str) -> bool:
@@ -460,6 +468,7 @@ class Assembler:
         return val
 
     def _encode(self, ln: SrcLine) -> int:
+        # This is the giant instruction packer. Figures out the instruction type and packs it into the 32-bit word.
         op, F, mod = ln.resolved
         ops = ln.operands
         kind = op.kind
@@ -491,17 +500,17 @@ class Assembler:
                 raise AsmError(f"memory operand must look like imm[rs1], e.g. 4[r2] or [sp] (got '{ops[1]}')")
             rs1 = self._reg(m.group("reg"), "base register")
             off = self._eval(m.group("off")) if m.group("off").strip() else 0
-            if not -32768 <= off <= 32767:
-                raise AsmError(f"offset {off} out of range [-32768, 32767]")
-            return isa.pack_word(op.opcode, 1, 0, rd, rs1, off & 0xFFFF)
+            if not -16384 <= off <= 16383:
+                raise AsmError(f"offset {off} out of range [-16384, 16383]")
+            return isa.pack_word(op.opcode, 1, 0, rd, rs1, off & 0x7FFF)
 
-        if kind == isa.K_UN2:                      # abs / neg / fcvt: register only
+        if kind == isa.K_UN2:                      # For abs, neg, fcvt: register only allowed here.
             need(2)
             rd = self._reg(ops[0])
             if not self._looks_like_reg(ops[1]):
                 raise AsmError(f"'{name}' only accepts a register source (got '{ops[1]}')")
             rs2 = self._reg(ops[1])
-            return isa.pack_word(op.opcode, 0, F, rd, 0, rs2 << 14)
+            return isa.pack_word(op.opcode, 0, F, rd, 0, rs2 << 13)
 
         if kind == isa.K_CMP:
             need(2)
@@ -525,7 +534,7 @@ class Assembler:
         raise AsmError(f"internal error: unhandled kind {kind}")      # pragma: no cover
 
     def _branch_offset(self, tok: str, ln: SrcLine) -> int:
-        """Label -> PC-relative offset in WORDS. Plain number/expression -> raw word offset."""
+        """If it is a label, do the PC-relative math to get the word offset. Otherwise just use the raw offset."""
         tok = tok.strip()
         if _IDENT_RE.match(tok) and not self._looks_like_reg(tok):
             sym = self.symbols.get(tok)
@@ -543,19 +552,19 @@ class Assembler:
                 off = sym.value
         else:
             off = self._eval(tok)
-        if not -(1 << 27) <= off < (1 << 27):
-            raise AsmError(f"branch offset {off} does not fit in 28 signed bits")
+        if not -(1 << 26) <= off < (1 << 26):
+            raise AsmError(f"branch offset {off} does not fit in 27 signed bits")
         return off
 
 
 # ==========================================================================
-# Convenience API + CLI
+# Convenience API + CLI: Stuff to make running this locally easier.
 # ==========================================================================
 
 
 def assemble_source(source: str, base: int = 0, strict: bool = False,
                     filename: str = "<input>") -> AssemblyResult:
-    """Assemble program text. Raises AssemblyFailed (str() gives all errors)."""
+    """Assembles the program text. Throws AssemblyFailed if there are errors so I can catch them."""
     return Assembler(base=base, strict=strict).assemble(source, filename)
 
 
@@ -565,11 +574,11 @@ def assemble_file(path: str, base: int = 0, strict: bool = False) -> AssemblyRes
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="RISC201 two-pass assembler (33-bit instructions)")
+    ap = argparse.ArgumentParser(description="RISC201 two-pass assembler (32-bit instructions)")
     ap.add_argument("source", help="assembly file (.asm / .s)")
     ap.add_argument("-o", "--output", help="output file (default: <source>.hex or .bin)")
     ap.add_argument("-f", "--format", choices=["hex", "bin"], default="hex",
-                    help="hex = 9 hex digits/line (default); bin = 33 binary digits/line")
+                    help="hex = 8 hex digits/line (default); bin = 32 binary digits/line")
     ap.add_argument("-l", "--listing", metavar="FILE", help="write address/word/source listing")
     ap.add_argument("-s", "--symbols", action="store_true", help="print the symbol table")
     ap.add_argument("--base", type=lambda x: int(x, 0), default=0,

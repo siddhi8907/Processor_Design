@@ -1,5 +1,5 @@
 ; float_demo.asm - IEEE-754 binary32 instructions (F bit = 1)
-        fmov  r1, 1.5           ; float immediate (top 18 bits of binary32)
+        fmov  r1, 1.5           ; float immediate (top 17 bits of binary32)
         fmov  r2, 2.25
         fadd  r3, r1, r2        ; 3.75
         fmul  r4, r3, 2.0       ; 7.5

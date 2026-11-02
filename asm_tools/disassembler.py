@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-disassembler.py - RISC201 disassembler: hex/binary words -> assembly text.
+disassembler.py - My RISC201 disassembler: turns those hex/binary words back into assembly text.
 
-Input words may be 9-digit hex (e.g. 098400005), 0xHEX, 0bBIN or 33-character
-binary strings, one or more per line, with ; // # comments.
+Input words can be 8-digit hex (like 4C200005), 0xHEX, 0bBIN or 32-character
+binary strings. I made it so it can read one or more per line, and it ignores ; // # comments.
 
-The output is re-assemblable.  Any word that is NOT a canonical encoding of a
-valid instruction (reserved opcode, junk in unused bit-fields, F=1 on an
-integer-only instruction, ...) is emitted as '.word 0x...' with a comment, so
-assemble(disassemble(x)) == x holds for every possible 33-bit word.
+The output is totally re-assemblable. If it finds a word that isn't a perfect canonical encoding of a
+valid instruction (like a reserved opcode, junk bits where it should be zero, or F=1 on an
+integer-only op), it just spits it out as '.word 0x...' with a comment. 
+Basically, assemble(disassemble(x)) == x is guaranteed for every possible 32-bit word.
 
-Library use (e.g. the simulator's debugger / pipeline viewer):
+Library use (when I hook this into the simulator's debugger or pipeline viewer):
     from disassembler import disassemble_word
-    disassemble_word(0x098400005)          # -> 'mov r1, 5'
+    disassemble_word(0x4C200005)           # -> 'mov r1, 5'
 
-Command line:
-    python disassembler.py prog.hex                 # print assembly
-    python disassembler.py prog.hex -o prog.asm     # write to file
-    python disassembler.py --words 098400005 190000000
-    python disassembler.py prog.hex --annotate      # address + raw word as comments
+Command line stuff:
+    python disassembler.py prog.hex                 # just prints the assembly
+    python disassembler.py prog.hex -o prog.asm     # writes it out to a file
+    python disassembler.py --words 4C200005 C8000000
+    python disassembler.py prog.hex --annotate      # adds the address + raw word as comments
 """
 from __future__ import annotations
 
@@ -37,18 +37,19 @@ except ImportError:
 @dataclass
 class Decoded:
     word: int
-    text: str                      # assembly text (branches use a numeric offset until labelled)
-    valid: bool                    # False -> emitted as .word
-    note: str = ""                 # reason when not valid / extra info
+    text: str                      # The actual assembly text (branches use a numeric offset until they get labelled)
+    valid: bool                    # If False, I just emit it as a .word
+    note: str = ""                 # Why it failed validation or just some extra info
     mnemonic: str = ""
-    branch_offset: Optional[int] = None   # in words, for beq/bgt/b/call
+    branch_offset: Optional[int] = None   # Word offset, used for beq/bgt/b/call
 
 
-def _fmt_float_imm18(imm18: int) -> str:
-    bits = (imm18 << 14) & 0xFFFFFFFF
+def _fmt_float_imm17(imm17: int) -> str:
+    # Need to shift the 17-bit immediate back up to get the actual float value
+    bits = (imm17 << 15) & 0xFFFFFFFF
     v = isa.bits32_to_float(bits)
     if math.isnan(v) or math.isinf(v):
-        return f"0x{bits:08X}"                     # raw pattern keeps the round trip exact
+        return f"0x{bits:08X}"                     # Just keep the raw pattern so the round trip stays exact
     s = f"{v:.9g}"
     if not any(c in s for c in ".eE"):
         s += ".0"
@@ -56,11 +57,12 @@ def _fmt_float_imm18(imm18: int) -> str:
 
 
 def _invalid(word: int, note: str) -> Decoded:
-    return Decoded(word, f".word 0x{word:09X}", False, note)
+    # Helper to just return a raw .word when things don't line up
+    return Decoded(word, f".word 0x{word:08X}", False, note)
 
 
 def decode(word: int) -> Decoded:
-    """Decode one 33-bit word. Branch offsets stay numeric (see disassemble_word for labels)."""
+    """Decodes a single 32-bit word. Branch offsets stay numeric here (disassemble_word handles the labels)."""
     f = isa.unpack_word(word)
     op = isa.OPS_BY_OPCODE.get(f.opcode)
     if op is None:
@@ -80,12 +82,14 @@ def decode(word: int) -> Decoded:
             return _invalid(word, f"F=1 is not allowed on '{name}'")
 
     # ---- per-kind canonical re-encoding ------------------------------------
+    # I basically rebuild the instruction from the parsed fields and check if it matches the original word.
+    # If it doesn't match, it means there are junk bits somewhere.
     if kind == isa.K_NONE:
         canon = isa.pack_word(op.opcode)
         text = name
 
     elif kind == isa.K_BRANCH:
-        off = isa.sext(f.offset28, 28)
+        off = isa.sext(f.offset27, 27)
         canon = isa.pack_branch(op.opcode, off)
         return _finish(word, canon, f"{name} {off}", name, off)
 
@@ -94,27 +98,28 @@ def decode(word: int) -> Decoded:
         text = f"{name} {R(f.rd)}"
 
     elif kind == isa.K_UN2:
-        canon = isa.pack_word(op.opcode, 0, F, f.rd, 0, f.rs2 << 14)
+        canon = isa.pack_word(op.opcode, 0, F, f.rd, 0, f.rs2 << 13)
         text = f"{name} {R(f.rd)}, {R(f.rs2)}"
 
     elif kind == isa.K_LDST:
-        canon = isa.pack_word(op.opcode, 1, 0, f.rd, f.rs1, f.imm16)
-        text = f"{name} {R(f.rd)}, {isa.sext(f.imm16, 16)}[{R(f.rs1)}]"
+        canon = isa.pack_word(op.opcode, 1, 0, f.rd, f.rs1, f.imm15)
+        text = f"{name} {R(f.rd)}, {isa.sext(f.imm15, 15)}[{R(f.rs1)}]"
 
-    else:                                           # ALU3 / CMP / MOV2
+    else:                                           # Handles ALU3, CMP, and MOV2
         suffix = ""
         if f.i == 0:
             op2 = R(f.rs2)
-            rest = f.rs2 << 14
+            rest = f.rs2 << 13
         elif F:
-            op2 = _fmt_float_imm18(f.imm18)
-            rest = f.imm18
+            op2 = _fmt_float_imm17(f.imm17)
+            rest = f.imm17
         else:
             if f.mod == 0b11:
                 return _invalid(word, "undefined immediate modifier 11")
             suffix = isa.MOD_SUFFIX[f.mod]
-            op2 = str(isa.sext(f.imm16, 16)) if f.mod == isa.MOD_NONE else f"0x{f.imm16:04X}"
-            rest = (f.mod << 16) | f.imm16
+            op2 = str(isa.sext(f.imm15, 15)) if f.mod == isa.MOD_NONE else f"0x{f.imm15:04X}"
+            rest = (f.mod << 15) | f.imm15
+            
         if kind == isa.K_ALU3:
             canon = isa.pack_word(op.opcode, f.i, F, f.rd, f.rs1, rest)
             text = f"{name}{suffix} {R(f.rd)}, {R(f.rs1)}, {op2}"
@@ -129,14 +134,15 @@ def decode(word: int) -> Decoded:
 
 
 def _finish(word: int, canon: int, text: str, name: str, off: Optional[int]) -> Decoded:
+    # Final check: if my rebuilt canonical word doesn't match the input, it's invalid.
     if canon != word:
         return _invalid(word, "non-canonical encoding (unused bits are not zero)")
     return Decoded(word, text, True, "", name, off)
 
 
 def disassemble_word(word: int, pc: int = 0, labels: Optional[Dict[int, str]] = None) -> str:
-    """Disassemble one word. If `labels` maps address->name, branch targets use them.
-    Without labels a branch shows its signed word offset (the assembler accepts that)."""
+    """Disassembles a single word. If I pass in a labels dictionary (address->name), it maps the branch targets.
+    Without labels, it just shows the signed word offset (which the assembler is fine with anyway)."""
     d = decode(word)
     if d.branch_offset is not None and labels:
         target = pc + d.branch_offset * isa.INSTR_BYTES
@@ -147,6 +153,7 @@ def disassemble_word(word: int, pc: int = 0, labels: Optional[Dict[int, str]] = 
 
 def disassemble_words(words: List[int], base: int = 0, use_labels: bool = True,
                       annotate: bool = False) -> str:
+    # Decodes a whole block of words and handles the label generation
     decoded = [decode(w) for w in words]
     end = base + len(words) * isa.INSTR_BYTES
 
@@ -184,7 +191,7 @@ def load_words(path: str) -> List[int]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="RISC201 disassembler (33-bit words -> assembly)")
+    ap = argparse.ArgumentParser(description="RISC201 disassembler (32-bit words -> assembly)")
     ap.add_argument("input", nargs="?", help="hex/binary image file ('-' = stdin)")
     ap.add_argument("--words", nargs="+", metavar="W", help="disassemble these words instead of a file")
     ap.add_argument("-o", "--output", help="write assembly to this file")
