@@ -1,10 +1,44 @@
-# Virtual Environments
+# Python Virtual Environments
 .venv/
-env/
 venv/
-ENV/
+env/
 
-# Python caches
+# Byte-compiled / Python caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .pytest_cache/
+.coverage
+htmlcov/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Simulator artifacts, logs, and generated dumps
+*.log
+*.dump
+trace_*.txt
+*.mem
+*.hex
+*.bin
+!tests/**/*.hex
+!tests/**/*.bin
+!evaluations/**/*.hex
+
+# Temporary documentation / Word lock files
+~$*.docx
+~$*.pptx
+~$*.xlsx
